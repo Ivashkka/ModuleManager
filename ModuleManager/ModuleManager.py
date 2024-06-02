@@ -6,12 +6,15 @@ from pydantic import PositiveInt, BaseModel, Field
 
 
 class MyModuleConf(BaseModel):
-    pass
+    instances_count : int = Field(default=0)
+    stdin : bool = Field(default=True)
+    stdout : bool = Field(default=True)
 
 class MyModuleState(BaseModel):
     started : bool = Field(default=False)
     paused : bool = Field(default=False)
     idle : bool = Field(default=True)
+    has_error : bool = Field(default=False)
 
 class MyModuleInput(BaseModel):
     pass
@@ -56,8 +59,8 @@ class MyModuleInstance(ABC):
         self._output_type = self.__class__.my_output_holder()
         self._stop_event = Event()
         self._pause_event = Event()
-        self.stdin = stdin
-        self.stdout = stdout
+        self.stdin = stdin if self.conf.stdin else None
+        self.stdout = stdout if self.conf.stdout else None
         self.stderr = stderr
         self.id = id
         self._main_thread = Thread(target=self._main_thread_body, name=self.__class__.__name__+f" id:{self.id} main thread", args=[])
@@ -73,22 +76,28 @@ class MyModuleInstance(ABC):
         self.post_init()
         while not self._stop_event.is_set():
             try:
+                if not self.stderr.empty(): self.state.has_error = True
                 if self._main_iteration_able_to_perform():
                     self.state.idle = False
-                    inputdata = self.stdin.get()
-                    if type(inputdata) != self._input_type: raise ValueError(f'bad input data type. Must be: {self._input_type}')
-                    outputdata = self.main_thread_iteration(inputdata)
-                    if type(outputdata) != self._output_type: raise ValueError(f'bad input data type. Must be: {self._input_type}')
-                    self.stdout.put(outputdata)
+                    if self.conf.stdin:
+                        inputdata = self.stdin.get()
+                        if type(inputdata) != self._input_type: raise ValueError(f'bad input data type. Must be: {self._input_type}')
+                        outputdata = self.main_thread_iteration(inputdata)
+                    else:
+                        outputdata = self.main_thread_iteration()
+                    if self.conf.stdout:
+                        if type(outputdata) != self._output_type: raise ValueError(f'bad input data type. Must be: {self._input_type}')
+                        self.stdout.put(outputdata)
                 self.state.idle = True
                 self.wait_if_paused()
             except Exception as err:
                 self.state.idle = True
+                self.state.has_error = True
                 self.stderr.put(err)
                 self.pause()
 
     def _main_iteration_able_to_perform(self) -> bool:
-        return (not self.stdin.empty()) and self.main_thread_iteration_condition()
+        return (self.conf.stdin and not self.stdin.empty()) and self.main_thread_iteration_condition()
 
     def wait_if_paused(self) -> None:
        while self._pause_event.is_set():
@@ -99,9 +108,15 @@ class MyModuleInstance(ABC):
         self._pause_event.set()
         self.state.paused = True
 
-    def unpause(self) -> None:
+    def unpause(self) -> bool:
+        if self.state.has_error: return False
         self._pause_event.clear()
         self.state.paused = False
+
+    def i_handled_error(self) -> bool:
+        if not self.stderr.empty(): return False
+        self.state.has_error = False
+        self.unpause()
 
     @abstractmethod
     def main_thread_iteration(self, stdin : MyModuleInput) -> MyModuleOutput:
