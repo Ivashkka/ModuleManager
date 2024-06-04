@@ -6,7 +6,6 @@ from pydantic import PositiveInt, BaseModel, Field
 
 
 class MyModuleConf(BaseModel):
-    instances_count : int = Field(default=0)
     stdin : bool = Field(default=True)
     stdout : bool = Field(default=True)
 
@@ -139,12 +138,12 @@ class BaseMyModule(RootMyModule):
     state : MyModuleState = None
 
     _instances : list[BaseMyModuleInstance] = None
+    _round_robin_count : int = None
 
     _stderr : Queue = None
 
-    _instances_in : Queue = None
-    _instances_out : Queue = None
-    _instances_err : Queue = None
+    @abstractmethod
+    def create_instance(): pass
 
     @abstractmethod
     def post_init() -> None: pass
@@ -200,19 +199,21 @@ class BaseMyModule(RootMyModule):
     @abstractmethod
     def _reset_module(): pass
 
+
+
 class MyModuleInstance(BaseMyModuleInstance):
     __slots__ = ['_stop_event', '_pause_event', '_main_thread', '_stdin', '_stdout', '_stderr', 'id', 'conf', 'state']
 
-    def __init__(self, stdin : Queue, stdout : Queue, stderr : Queue, id : int):
+    def __init__(self, id : int):
         self.conf = self.__class__.my_conf_holder()()
         self.state = self.__class__.my_state_holder()()
         self._input_type = self.__class__.my_input_holder()
         self._output_type = self.__class__.my_output_holder()
         self._stop_event = Event()
         self._pause_event = Event()
-        self._stdin = stdin if self.conf.stdin else None
-        self._stdout = stdout if self.conf.stdout else None
-        self._stderr = stderr
+        self._stdin = Queue() if self.conf.stdin else None
+        self._stdout = Queue() if self.conf.stdout else None
+        self._stderr = Queue()
         self.id = id
         self._main_thread = Thread(target=self._main_thread_body, name=self.__class__.__name__+f" id:{self.id} main thread", args=[])
         self._main_thread.start()
@@ -255,7 +256,7 @@ class MyModuleInstance(BaseMyModuleInstance):
         else: return (not self._stdin.empty()) and self.main_thread_iteration_condition()
 
     def wait_if_paused(self):
-       while self._pause_event.is_set():
+        while self._pause_event.is_set():
             if self._stop_event.is_set():
                 self.unpause()
 
@@ -325,12 +326,7 @@ class MyModule(BaseMyModule):
         cls._stdout = Queue() if cls.conf.stdout else None
         cls._stderr = Queue()
         cls._instances = []
-        if cls.conf.instances_count > 0:
-            cls._instances_in = Queue()
-            cls._instances_out = Queue()
-            cls._instances_err = Queue()
-            for i in range(0, cls.conf.instances_count):
-                cls._instances.append(cls._instance_type(cls._instances_in, cls._instances_out, cls._instances_err, i))
+        cls._round_robin_count = 0
         cls._main_thread = Thread(target=cls._main_thread_body, name=cls.__name__+" main thread", args=[])
         cls._main_thread.start()
         cls.state.started = True
@@ -347,6 +343,13 @@ class MyModule(BaseMyModule):
         cls._reset_module()
 
     @classmethod
+    def create_instance(cls):
+        if (cls.state == None or cls.state.started == False): raise Exception(f'{cls.__name__} has not been started.')
+        if cls._instance_type == None or cls._instance_type == BaseMyModuleInstance: raise Exception(f'{cls.__name__} has no instance type')
+        my_instance = cls._instance_type(len(cls._instances))
+        cls._instances.append(my_instance)
+
+    @classmethod
     def _reset_module(cls):
         cls._main_thread = None
         cls._stop_event = None
@@ -360,9 +363,7 @@ class MyModule(BaseMyModule):
         cls._stdout = None
         cls._stderr = None
         cls._instances = None
-        cls._instances_in = None
-        cls._instances_out = None
-        cls._instances_err = None
+        cls._round_robin_count = None
 
     @classmethod
     def _main_thread_body(cls):
@@ -392,7 +393,8 @@ class MyModule(BaseMyModule):
     @classmethod
     def _main_iteration_able_to_perform(cls) -> bool:
         if not cls.main_thread_iteration_condition(): return False
-        if not cls._instances_out.empty(): return True
+        for i in cls._instances:
+            if not i.empty_output(): return True
         if not cls.conf.stdin: return True
         else: return not cls._stdin.empty()
 
@@ -400,21 +402,18 @@ class MyModule(BaseMyModule):
     def _pipe(cls):
         inputdata = None
         outputdata = None
-        if cls.conf.stdin:
-            inputdata = cls._take()
-        if inputdata == None and cls.conf.instances_count > 0:
-            inputdata = cls._take_inst()
-        if cls.conf.stdin and inputdata != None:
-            outputdata = cls.main_thread_iteration(inputdata)
-        elif cls.conf.instances_count > 0 and inputdata != None:
-            outputdata = cls.main_thread_iteration(inputdata)
+        if cls.conf.stdin: inputdata = cls._take()
+        if inputdata == None: inputdata = cls._take_inst()
+        if inputdata != None: outputdata = cls.main_thread_iteration(inputdata)
+        elif not cls.conf.stdin: outputdata = cls.main_thread_iteration()
         else: raise Exception(f'{cls.__name__} internal error (None pipe input)')
-        if type(outputdata) == cls._instance_type.my_input_holder():
+        if cls._instance_type != BaseMyModuleInstance and type(outputdata) == cls._instance_type.my_input_holder():
             cls._give_inst(outputdata)
         elif cls.conf.stdout: cls._give(outputdata)
 
     @classmethod
     def get(cls, wait : bool = False) -> MyModuleOutput | None:
+        if (cls.state == None or cls.state.started == False): raise Exception(f'{cls.__name__} has not been started.')
         if not cls.conf.stdout: raise Exception(f'{cls.__name__} has no stdout queue')
         if (not wait) and cls._stdout.empty(): return None
         outputdata = cls._stdout.get()
@@ -423,16 +422,19 @@ class MyModule(BaseMyModule):
 
     @classmethod
     def empty_output(cls) -> bool:
+        if (cls.state == None or cls.state.started == False): raise Exception(f'{cls.__name__} has not been started.')
         return cls._stdout.empty()
 
     @classmethod
     def put(cls, inputdata : MyModuleInput):
+        if (cls.state == None or cls.state.started == False): raise Exception(f'{cls.__name__} has not been started.')
         if not cls.conf.stdin: raise Exception(f'{cls.__name__} has no stdin queue')
         if type(inputdata) != cls._input_type: raise ValueError(f'bad input data type. {cls.__name__} wants: {cls._input_type}')
         cls._stdin.put(inputdata)
 
     @classmethod
     def check(cls) -> Exception | None:
+        if (cls.state == None or cls.state.started == False): raise Exception(f'{cls.__name__} has not been started.')
         if cls._stderr.empty(): return None
         return cls._stderr.get()
 
@@ -452,26 +454,28 @@ class MyModule(BaseMyModule):
 
     @classmethod
     def _take_inst(cls) -> MyModuleOutput | None:
-        if cls.conf.instances_count <= 0: raise Exception(f'{cls.__name__} internal instout error (no instances)')
-        if cls._instances_out.empty(): return None
-        outputdata = cls._instances_out.get()
-        if type(outputdata) != cls._instance_type.my_output_holder(): raise ValueError(f'{cls.__name__} internal instout error (wrong type)')
+        outputdata = None
+        for i in cls._instances:
+            outputdata = i.get()
+            if outputdata != None: return outputdata
         return outputdata
 
     @classmethod
     def _give_inst(cls, inputdata : MyModuleInput):
-        if cls.conf.instances_count <= 0: raise Exception(f'{cls.__name__} internal instin error (no instances)')
-        if type(inputdata) != cls._instance_type.my_input_holder(): raise ValueError(f'{cls.__name__} internal instin error (wrong type)')
-        cls._instances_in.put(inputdata)
+        cls._instances[cls._round_robin_count].put(inputdata)
+        cls._round_robin_count += 1
+        if cls._round_robin_count >= len(cls._instances): cls._round_robin_count = 0
 
     @classmethod
     def wait_if_paused(cls):
-       while cls._pause_event.is_set():
+        if (cls.state == None or cls.state.started == False): raise Exception(f'{cls.__name__} has not been started.')
+        while cls._pause_event.is_set():
             if cls._stop_event.is_set():
                 cls.unpause()
 
     @classmethod
     def pause(cls):
+        if (cls.state == None or cls.state.started == False): raise Exception(f'{cls.__name__} has not been started.')
         for i in cls._instances:
             i.pause()
         cls._pause_event.set()
@@ -479,6 +483,7 @@ class MyModule(BaseMyModule):
 
     @classmethod
     def unpause(cls):
+        if (cls.state == None or cls.state.started == False): raise Exception(f'{cls.__name__} has not been started.')
         if cls.state.has_error:
             raise Exception(f'{cls.__name__} has errors in stderr queue. Handle them before unpausing')
         for i in cls._instances:
@@ -488,6 +493,7 @@ class MyModule(BaseMyModule):
 
     @classmethod
     def i_handled_error(cls):
+        if (cls.state == None or cls.state.started == False): raise Exception(f'{cls.__name__} has not been started.')
         if not cls._stderr.empty(): raise Exception(f'{cls.__name__} has more errors in stderr queue')
         for i in cls._instances:
             i.i_handled_error()
