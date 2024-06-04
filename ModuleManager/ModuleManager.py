@@ -190,6 +190,9 @@ class BaseMyModule(RootMyModule):
     def i_handled_error(): pass
 
     @abstractmethod
+    def get_instances_state() -> list[MyModuleState]: pass
+
+    @abstractmethod
     def main_thread_iteration(stdin : MyModuleInput | MyModuleOutput) -> MyModuleOutput | MyModuleInput: return None
 
     @abstractmethod
@@ -396,6 +399,13 @@ class MyModule(BaseMyModule):
             if not i.empty_output(): return True
         if not cls.conf.stdin: return True
         else: return not cls._stdin.empty()
+
+    @classmethod
+    def get_instances_state(cls) -> list[MyModuleState]:
+        states = []
+        for i in cls._instances:
+            states.append(i.state)
+        return states
 
     @classmethod
     def _pipe(cls):
