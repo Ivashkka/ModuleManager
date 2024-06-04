@@ -1,8 +1,7 @@
 from queue import Queue
 from threading import Thread, Event
 from abc import ABC, abstractmethod
-from typing import Any, Callable
-from pydantic import PositiveInt, BaseModel, Field
+from pydantic import BaseModel, Field
 
 
 class MyModuleConf(BaseModel):

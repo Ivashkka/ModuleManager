@@ -1,4 +1,7 @@
+from .ModuleManager import RootMyModule
+from .ModuleManager import BaseMyModule
 from .ModuleManager import MyModule
+from .ModuleManager import BaseMyModuleInstance
 from .ModuleManager import MyModuleInstance
 from .ModuleManager import MyModuleInput
 from .ModuleManager import MyModuleOutput
