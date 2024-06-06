@@ -5,6 +5,10 @@
 
 # test files
 test.py
+# pypi files
+build
+dist
+*.egg-info
 
 # User-specific files
 *.rsuser

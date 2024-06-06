@@ -84,7 +84,7 @@ class BaseMyModuleInstance(ABC):
     def i_handled_error(self): pass
 
     @abstractmethod
-    def main_thread_iteration(self, stdin : MyModuleInput) -> MyModuleOutput: return None
+    def main_thread_iteration(self, stdin : MyModuleInput) -> MyModuleOutput | list[MyModuleOutput]: return None
 
     @abstractmethod
     def main_thread_iteration_condition(self) -> bool: return True
@@ -193,7 +193,7 @@ class BaseMyModule(RootMyModule):
     def get_instances_state() -> list[MyModuleState]: pass
 
     @abstractmethod
-    def main_thread_iteration(stdin : MyModuleInput | MyModuleOutput) -> MyModuleOutput | MyModuleInput: return None
+    def main_thread_iteration(stdin : MyModuleInput | MyModuleOutput) -> MyModuleOutput | list[MyModuleOutput] | MyModuleInput | list[MyModuleInput]: return None
 
     @abstractmethod
     def main_thread_iteration_condition() -> bool: return True
@@ -243,7 +243,10 @@ class MyModuleInstance(BaseMyModuleInstance):
                     else:
                         outputdata = self.main_thread_iteration()
                     if self.conf.stdout:
-                        self._give(outputdata)
+                        if type(outputdata) == list:
+                            for d in outputdata: self._give(d)
+                        else:
+                            self._give(outputdata)
                 if idle_count >= 2: self.state.idle = True
                 self.wait_if_paused()
             except Exception as err:
@@ -375,10 +378,6 @@ class MyModule(BaseMyModule):
             try:
                 if idle_count < 2: idle_count += 1
                 if not cls._stderr.empty(): cls.state.has_error = True
-                for i in cls._instances:
-                    inst_err = i.check()
-                    if inst_err != None:
-                        raise Exception(f'{cls.__name__} internal error (instance with id {i.id} got error {inst_err})')
                 if cls._main_iteration_able_to_perform():
                     idle_count = 0
                     cls.state.idle = False
@@ -416,9 +415,16 @@ class MyModule(BaseMyModule):
         if inputdata != None: outputdata = cls.main_thread_iteration(inputdata)
         elif not cls.conf.stdin: outputdata = cls.main_thread_iteration()
         else: raise Exception(f'{cls.__name__} internal error (None pipe input)')
-        if cls._instance_type != BaseMyModuleInstance and type(outputdata) == cls._instance_type.my_input_holder():
-            cls._give_inst(outputdata)
-        elif cls.conf.stdout: cls._give(outputdata)
+        if cls._instance_type != BaseMyModuleInstance:
+            if type(outputdata) == cls._instance_type.my_input_holder():
+                cls._give_inst(outputdata)
+            elif type(outputdata) == list:
+                for d in outputdata: cls._give_inst(d)
+        elif cls.conf.stdout:
+            if type(outputdata) == list:
+                for d in outputdata: cls._give(d)
+            else:
+                cls._give(outputdata)
 
     @classmethod
     def get(cls, wait : bool = False) -> MyModuleOutput | None:
@@ -444,8 +450,11 @@ class MyModule(BaseMyModule):
     @classmethod
     def check(cls) -> Exception | None:
         if (cls.state == None or cls.state.started == False): raise Exception(f'{cls.__name__} has not been started.')
-        if cls._stderr.empty(): return None
-        return cls._stderr.get()
+        if not cls._stderr.empty(): return cls._stderr.get()
+        for i in cls._instances:
+            err_data = i.check()
+            if err_data != None: return err_data
+        return None
 
     @classmethod
     def _take(cls) -> MyModuleInput | None:
@@ -471,7 +480,15 @@ class MyModule(BaseMyModule):
 
     @classmethod
     def _give_inst(cls, inputdata : MyModuleInput):
-        cls._instances[cls._round_robin_count].put(inputdata)
+        if len(cls._instances) <= 0: raise Exception(f'{cls.__name__} internal error (no instances to give data)')
+        skipps = 0
+        iid = cls._round_robin_count
+        while skipps <= len(cls._instances):
+            iid = cls._round_robin_count + skipps
+            if iid >= len(cls._instances): iid -= len(cls._instances)
+            if cls._instances[iid].state.has_error == False: break
+            skipps += 1
+        cls._instances[iid].put(inputdata)
         cls._round_robin_count += 1
         if cls._round_robin_count >= len(cls._instances): cls._round_robin_count = 0
 
